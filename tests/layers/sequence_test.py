@@ -94,6 +94,19 @@ def test_Transformer(attention_type):
                                 (BATCH_SIZE, 1), (BATCH_SIZE, 1)])
 
 
+@pytest.mark.parametrize(
+    'attention_type',
+    ['scaled_dot_product', 'cos', 'ln', 'additive']
+)
+def test_MultiHeadAttention(attention_type):
+    with CustomObjectScope({'MultiHeadAttention': sequence.MultiHeadAttention}):
+        layer_test(sequence.MultiHeadAttention,
+                   kwargs={'att_embedding_size': 1, 'head_num': 8, 'use_layer_norm': True, 'supports_masking': False,
+                           'attention_type': attention_type, 'dropout_rate': 0.5},
+                   input_shape=[(BATCH_SIZE, SEQ_LENGTH, EMBEDDING_SIZE), (BATCH_SIZE, SEQ_LENGTH, EMBEDDING_SIZE),
+                                (BATCH_SIZE, 1), (BATCH_SIZE, 1)])
+
+
 def test_KMaxPooling():
     with CustomObjectScope({'KMaxPooling': sequence.KMaxPooling}):
         layer_test(sequence.KMaxPooling, kwargs={'k': 3, 'axis': 1},
