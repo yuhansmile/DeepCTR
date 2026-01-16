@@ -8,14 +8,14 @@ Author:
 
 import numpy as np
 import tensorflow as tf
-from tensorflow.python.keras import backend as K
+from tensorflow.keras import backend as K
 
 try:
     from tensorflow.python.ops.init_ops import TruncatedNormal, Constant, glorot_uniform_initializer as glorot_uniform
 except ImportError:
     from tensorflow.python.ops.init_ops_v2 import TruncatedNormal, Constant, glorot_uniform
 
-from tensorflow.python.keras.layers import LSTM, Lambda, Layer, Dropout
+from tensorflow.keras.layers import LSTM, Lambda, Layer, Dropout
 
 from .core import LocalActivationUnit
 from .normalization import LayerNormalization
@@ -485,9 +485,9 @@ class Transformer(Layer):
                                        dtype=tf.float32,
                                        initializer=TruncatedNormal(seed=self.seed + 2))
         if self.attention_type == "additive":
-            self.b = self.add_weight('b', shape=[self.att_embedding_size], dtype=tf.float32,
+            self.b = self.add_weight(name='b', shape=[self.att_embedding_size], dtype=tf.float32,
                                      initializer=glorot_uniform(seed=self.seed))
-            self.v = self.add_weight('v', shape=[self.att_embedding_size], dtype=tf.float32,
+            self.v = self.add_weight(name='v', shape=[self.att_embedding_size], dtype=tf.float32,
                                      initializer=glorot_uniform(seed=self.seed))
         elif self.attention_type == "ln":
             self.att_ln_q = LayerNormalization()
@@ -496,9 +496,9 @@ class Transformer(Layer):
         #     self.W_Res = self.add_weight(name='res', shape=[embedding_size, self.att_embedding_size * self.head_num], dtype=tf.float32,
         #                                  initializer=TruncatedNormal(seed=self.seed))
         if self.use_feed_forward:
-            self.fw1 = self.add_weight('fw1', shape=[self.num_units, 4 * self.num_units], dtype=tf.float32,
+            self.fw1 = self.add_weight(name='fw1', shape=[self.num_units, 4 * self.num_units], dtype=tf.float32,
                                        initializer=glorot_uniform(seed=self.seed))
-            self.fw2 = self.add_weight('fw2', shape=[4 * self.num_units, self.num_units], dtype=tf.float32,
+            self.fw2 = self.add_weight(name='fw2', shape=[4 * self.num_units, self.num_units], dtype=tf.float32,
                                        initializer=glorot_uniform(seed=self.seed))
 
         self.dropout = Dropout(
@@ -663,7 +663,7 @@ class PositionEncoding(Layer):
         position_enc[:, 1::2] = np.cos(position_enc[:, 1::2])  # dim 2i+1
         if self.zero_pad:
             position_enc[0, :] = np.zeros(num_units)
-        self.lookup_table = self.add_weight("lookup_table", (T, num_units),
+        self.lookup_table = self.add_weight(name="lookup_table", shape=(T, num_units),
                                             initializer=Constant(position_enc),
                                             trainable=self.pos_embedding_trainable)
 
@@ -713,13 +713,13 @@ class BiasEncoding(Layer):
                 embed_size = input_shape[0][2]
                 seq_len_max = input_shape[0][1]
 
-        self.sess_bias_embedding = self.add_weight('sess_bias_embedding', shape=(self.sess_max_count, 1, 1),
+        self.sess_bias_embedding = self.add_weight(name='sess_bias_embedding', shape=(self.sess_max_count, 1, 1),
                                                    initializer=TruncatedNormal(
                                                        mean=0.0, stddev=0.0001, seed=self.seed))
-        self.seq_bias_embedding = self.add_weight('seq_bias_embedding', shape=(1, seq_len_max, 1),
+        self.seq_bias_embedding = self.add_weight(name='seq_bias_embedding', shape=(1, seq_len_max, 1),
                                                   initializer=TruncatedNormal(
                                                       mean=0.0, stddev=0.0001, seed=self.seed))
-        self.item_bias_embedding = self.add_weight('item_bias_embedding', shape=(1, 1, embed_size),
+        self.item_bias_embedding = self.add_weight(name='item_bias_embedding', shape=(1, 1, embed_size),
                                                    initializer=TruncatedNormal(
                                                        mean=0.0, stddev=0.0001, seed=self.seed))
 
