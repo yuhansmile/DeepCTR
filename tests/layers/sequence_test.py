@@ -2,18 +2,24 @@ import pytest
 from packaging import version
 
 try:
-    from tensorflow.python.keras.utils.generic_utils import CustomObjectScope
+    from tensorflow.keras.utils import CustomObjectScope
 except ImportError:
-    from tensorflow.python.keras.utils import CustomObjectScope
+    try:
+        from tensorflow.python.keras.utils.generic_utils import CustomObjectScope
+    except ImportError:
+        from tensorflow.python.keras.utils import CustomObjectScope
 import tensorflow as tf
 from deepctr.layers import sequence
 
 from tests.utils import layer_test
 try:
     tf.keras.backend.set_learning_phase(True)
-except ImportError:
-    from tensorflow.python.keras.backend import set_learning_phase
-    set_learning_phase(True)
+except (ImportError, AttributeError):
+    try:
+        from tensorflow.python.keras.backend import set_learning_phase
+        set_learning_phase(True)
+    except:
+        pass # set_learning_phase might not be needed or available in this version
 BATCH_SIZE = 4
 EMBEDDING_SIZE = 8
 SEQ_LENGTH = 10
@@ -67,7 +73,6 @@ def test_SequencePoolingLayer(mode, supports_masking, input_shape):
 #                    input_shape=input_shape, supports_masking=supports_masking)
 #
 
-
 @pytest.mark.parametrize(
 
     'merge_mode',
@@ -111,3 +116,28 @@ def test_PositionEncoding(pos_embedding_trainable, zero_pad):
         layer_test(sequence.PositionEncoding,
                    kwargs={'pos_embedding_trainable': pos_embedding_trainable, 'zero_pad': zero_pad},
                    input_shape=(BATCH_SIZE, SEQ_LENGTH, EMBEDDING_SIZE))
+
+
+@pytest.mark.parametrize(
+    'attention_type',
+    ['scaled_dot_product', 'cos', 'ln', 'additive']
+)
+def test_MultiHeadAttention(attention_type):
+    with CustomObjectScope({'MultiHeadAttention': sequence.MultiHeadAttention}):
+        layer_test(sequence.MultiHeadAttention,
+                   kwargs={'att_embedding_size': 1, 'head_num': 8, 'use_layer_norm': True, 'supports_masking': False,
+                           'attention_type': attention_type, 'dropout_rate': 0.5, 'output_type': 'sum'},
+                   input_shape=[(BATCH_SIZE, SEQ_LENGTH, EMBEDDING_SIZE), (BATCH_SIZE, SEQ_LENGTH, EMBEDDING_SIZE),
+                                (BATCH_SIZE, 1), (BATCH_SIZE, 1)])
+
+@pytest.mark.parametrize(
+    'output_type',
+    ['mean', 'sum', None]
+)
+def test_MultiHeadAttention_output_type(output_type):
+    with CustomObjectScope({'MultiHeadAttention': sequence.MultiHeadAttention}):
+        layer_test(sequence.MultiHeadAttention,
+                   kwargs={'att_embedding_size': 1, 'head_num': 8, 'use_layer_norm': True, 'supports_masking': False,
+                           'attention_type': 'scaled_dot_product', 'dropout_rate': 0.5, 'output_type': output_type},
+                   input_shape=[(BATCH_SIZE, SEQ_LENGTH, EMBEDDING_SIZE), (BATCH_SIZE, SEQ_LENGTH, EMBEDDING_SIZE),
+                                (BATCH_SIZE, 1), (BATCH_SIZE, 1)])

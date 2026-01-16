@@ -8,14 +8,17 @@ Author:
 
 import numpy as np
 import tensorflow as tf
-from tensorflow.python.keras import backend as K
+try:
+    from tensorflow.keras import backend as K
+    from tensorflow.keras.layers import LSTM, Lambda, Layer, Dropout
+except ImportError:
+    from tensorflow.python.keras import backend as K
+    from tensorflow.python.keras.layers import LSTM, Lambda, Layer, Dropout
 
 try:
     from tensorflow.python.ops.init_ops import TruncatedNormal, Constant, glorot_uniform_initializer as glorot_uniform
 except ImportError:
     from tensorflow.python.ops.init_ops_v2 import TruncatedNormal, Constant, glorot_uniform
-
-from tensorflow.python.keras.layers import LSTM, Lambda, Layer, Dropout
 
 from .core import LocalActivationUnit
 from .normalization import LayerNormalization
@@ -415,6 +418,200 @@ class BiLSTM(Layer):
         config = {'units': self.units, 'layers': self.layers,
                   'res_layers': self.res_layers, 'dropout_rate': self.dropout_rate, 'merge_mode': self.merge_mode}
         base_config = super(BiLSTM, self).get_config()
+        return dict(list(base_config.items()) + list(config.items()))
+
+
+class MultiHeadAttention(Layer):
+    """
+      Multi-Head Attention layer proposed in 《Attention is all you need》
+      Input shape
+        - a list of two 3D tensor with shape ``(batch_size, timesteps, input_dim)`` if ``supports_masking=True`` .
+        - a list of two 4 tensors, first two tensors with shape ``(batch_size, timesteps, input_dim)``,last two tensors with shape ``(batch_size, 1)`` if ``supports_masking=False`` .
+
+      Output shape
+        - 3D tensor with shape: ``(batch_size, 1, input_dim)``  if ``output_type='mean'`` or ``output_type='sum'`` , else  ``(batch_size, timesteps, input_dim)`` .
+
+      Arguments
+            - **att_embedding_size**: int.The embedding size in multi-head self-attention network.
+            - **head_num**: int.The head number in multi-head  self-attention network.
+            - **dropout_rate**: float between 0 and 1. Fraction of the units to drop.
+            - **use_res**: bool. Whether or not use standard residual connections before output.
+            - **use_layer_norm**: bool. Whether or not use Layer Normalization.
+            - **blinding**: bool. Whether or not use blinding.
+            - **seed**: A Python integer to use as random seed.
+            - **supports_masking**:bool. Whether or not support masking.
+            - **attention_type**: str, Type of attention, the value must be one of { ``'scaled_dot_product'`` , ``'cos'`` , ``'ln'`` , ``'additive'`` }.
+            - **output_type**: ``'mean'`` , ``'sum'`` or `None`. Whether or not use average/sum pooling for output.
+
+      References
+            - [Vaswani, Ashish, et al. "Attention is all you need." Advances in Neural Information Processing Systems. 2017.](https://papers.nips.cc/paper/7181-attention-is-all-you-need.pdf)
+    """
+
+    def __init__(self, att_embedding_size=1, head_num=8, dropout_rate=0.0, use_res=True,
+                 use_layer_norm=False, blinding=True, seed=1024, supports_masking=False,
+                 attention_type="scaled_dot_product", output_type="mean", **kwargs):
+        if head_num <= 0:
+            raise ValueError('head_num must be a int > 0')
+        self.att_embedding_size = att_embedding_size
+        self.head_num = head_num
+        self.num_units = att_embedding_size * head_num
+        self.use_res = use_res
+        self.seed = seed
+        self.dropout_rate = dropout_rate
+        self.use_layer_norm = use_layer_norm
+        self.blinding = blinding
+        self.attention_type = attention_type
+        self.output_type = output_type
+        super(MultiHeadAttention, self).__init__(**kwargs)
+        self.supports_masking = supports_masking
+
+    def build(self, input_shape):
+        embedding_size = int(input_shape[0][-1])
+        if self.num_units != embedding_size:
+            raise ValueError(
+                "att_embedding_size * head_num must equal the last dimension size of inputs,got %d * %d != %d" % (
+                    self.att_embedding_size, self.head_num, embedding_size))
+        self.seq_len_max = int(input_shape[0][-2])
+        self.W_Query = self.add_weight(name='query', shape=[embedding_size, self.att_embedding_size * self.head_num],
+                                       dtype=tf.float32,
+                                       initializer=TruncatedNormal(seed=self.seed))
+        self.W_key = self.add_weight(name='key', shape=[embedding_size, self.att_embedding_size * self.head_num],
+                                     dtype=tf.float32,
+                                     initializer=TruncatedNormal(seed=self.seed + 1))
+        self.W_Value = self.add_weight(name='value', shape=[embedding_size, self.att_embedding_size * self.head_num],
+                                       dtype=tf.float32,
+                                       initializer=TruncatedNormal(seed=self.seed + 2))
+        if self.attention_type == "additive":
+            self.b = self.add_weight('b', shape=[self.att_embedding_size], dtype=tf.float32,
+                                     initializer=glorot_uniform(seed=self.seed))
+            self.v = self.add_weight('v', shape=[self.att_embedding_size], dtype=tf.float32,
+                                     initializer=glorot_uniform(seed=self.seed))
+        elif self.attention_type == "ln":
+            self.att_ln_q = LayerNormalization()
+            self.att_ln_k = LayerNormalization()
+
+        self.dropout = Dropout(
+            self.dropout_rate, seed=self.seed)
+        self.ln = LayerNormalization()
+        # Be sure to call this somewhere!
+        super(MultiHeadAttention, self).build(input_shape)
+
+    def call(self, inputs, mask=None, training=None, **kwargs):
+
+        if self.supports_masking:
+            queries, keys = inputs
+            query_masks, key_masks = mask
+            query_masks = tf.cast(query_masks, tf.float32)
+            key_masks = tf.cast(key_masks, tf.float32)
+        else:
+            queries, keys, query_masks, key_masks = inputs
+
+            query_masks = tf.sequence_mask(
+                query_masks, self.seq_len_max, dtype=tf.float32)
+            key_masks = tf.sequence_mask(
+                key_masks, self.seq_len_max, dtype=tf.float32)
+            query_masks = tf.squeeze(query_masks, axis=1)
+            key_masks = tf.squeeze(key_masks, axis=1)
+
+        Q = tf.tensordot(queries, self.W_Query,
+                         axes=(-1, 0))  # N T_q D*h
+        K = tf.tensordot(keys, self.W_key, axes=(-1, 0))
+        V = tf.tensordot(keys, self.W_Value, axes=(-1, 0))
+
+        # h*N T_q D
+        Q_ = tf.concat(tf.split(Q, self.head_num, axis=2), axis=0)
+        K_ = tf.concat(tf.split(K, self.head_num, axis=2), axis=0)
+        V_ = tf.concat(tf.split(V, self.head_num, axis=2), axis=0)
+
+        if self.attention_type == "scaled_dot_product":
+            # h*N T_q T_k
+            outputs = tf.matmul(Q_, K_, transpose_b=True)
+
+            outputs = outputs / (K_.get_shape().as_list()[-1] ** 0.5)
+        elif self.attention_type == "cos":
+            Q_cos = tf.nn.l2_normalize(Q_, dim=-1)
+            K_cos = tf.nn.l2_normalize(K_, dim=-1)
+
+            outputs = tf.matmul(Q_cos, K_cos, transpose_b=True)  # h*N T_q T_k
+
+            outputs = outputs * 20  # Scale
+        elif self.attention_type == 'ln':
+            Q_ = self.att_ln_q(Q_)
+            K_ = self.att_ln_k(K_)
+
+            outputs = tf.matmul(Q_, K_, transpose_b=True)  # h*N T_q T_k
+            # Scale
+            outputs = outputs / (K_.get_shape().as_list()[-1] ** 0.5)
+        elif self.attention_type == "additive":
+            Q_reshaped = tf.expand_dims(Q_, axis=-2)
+            K_reshaped = tf.expand_dims(K_, axis=-3)
+            outputs = tf.tanh(tf.nn.bias_add(Q_reshaped + K_reshaped, self.b))
+            outputs = tf.squeeze(tf.tensordot(outputs, tf.expand_dims(self.v, axis=-1), axes=[-1, 0]), axis=-1)
+        else:
+            raise ValueError("attention_type must be [scaled_dot_product,cos,ln,additive]")
+
+        key_masks = tf.tile(key_masks, [self.head_num, 1])
+
+        # (h*N, T_q, T_k)
+        key_masks = tf.tile(tf.expand_dims(key_masks, 1),
+                            [1, tf.shape(queries)[1], 1])
+
+        paddings = tf.ones_like(outputs) * (-2 ** 32 + 1)
+
+        # (h*N, T_q, T_k)
+
+        outputs = tf.where(tf.equal(key_masks, 1), outputs, paddings, )
+        if self.blinding:
+            try:
+                outputs = tf.matrix_set_diag(outputs, tf.ones_like(outputs)[
+                                                      :, :, 0] * (-2 ** 32 + 1))
+            except AttributeError:
+                outputs = tf.compat.v1.matrix_set_diag(outputs, tf.ones_like(outputs)[
+                                                                :, :, 0] * (-2 ** 32 + 1))
+
+        outputs -= reduce_max(outputs, axis=-1, keep_dims=True)
+        outputs = softmax(outputs)
+        query_masks = tf.tile(query_masks, [self.head_num, 1])  # (h*N, T_q)
+        # (h*N, T_q, T_k)
+        query_masks = tf.tile(tf.expand_dims(
+            query_masks, -1), [1, 1, tf.shape(keys)[1]])
+
+        outputs *= query_masks
+
+        outputs = self.dropout(outputs, training=training)
+        # Weighted sum
+        # ( h*N, T_q, C/h)
+        result = tf.matmul(outputs, V_)
+        result = tf.concat(tf.split(result, self.head_num, axis=0), axis=2)
+
+        if self.use_res:
+            # tf.tensordot(queries, self.W_Res, axes=(-1, 0))
+            result += queries
+        if self.use_layer_norm:
+            result = self.ln(result)
+
+        if self.output_type == "mean":
+            return reduce_mean(result, axis=1, keep_dims=True)
+        elif self.output_type == "sum":
+            return reduce_sum(result, axis=1, keep_dims=True)
+        else:
+            return result
+
+    def compute_output_shape(self, input_shape):
+        if self.output_type == "mean" or self.output_type == "sum":
+            return (None, 1, self.att_embedding_size * self.head_num)
+        else:
+            return (None, input_shape[0][1], self.att_embedding_size * self.head_num)
+
+    def compute_mask(self, inputs, mask=None):
+        return None
+
+    def get_config(self, ):
+        config = {'att_embedding_size': self.att_embedding_size, 'head_num': self.head_num,
+                  'dropout_rate': self.dropout_rate, 'use_res': self.use_res,
+                  'use_layer_norm': self.use_layer_norm, 'seed': self.seed, 'supports_masking': self.supports_masking,
+                  'blinding': self.blinding, 'attention_type': self.attention_type, 'output_type': self.output_type}
+        base_config = super(MultiHeadAttention, self).get_config()
         return dict(list(base_config.items()) + list(config.items()))
 
 
