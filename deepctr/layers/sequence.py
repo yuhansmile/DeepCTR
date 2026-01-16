@@ -418,6 +418,175 @@ class BiLSTM(Layer):
         return dict(list(base_config.items()) + list(config.items()))
 
 
+class MultiHeadAttention(Layer):
+    """Multi-head attention core component.
+
+      Input shape
+        - If ``supports_masking=True``: a list of 2 or 3 3D tensors
+          ``[queries, keys]`` or ``[queries, keys, values]``, all with shape
+          ``(batch_size, timesteps, input_dim)``. Keras masks must be provided.
+        - If ``supports_masking=False``: a list of 4 or 5 tensors
+          ``[queries, keys, query_length, key_length]`` or
+          ``[queries, keys, values, query_length, key_length]``, where lengths
+          are with shape ``(batch_size, 1)``.
+
+      Output shape
+        - 3D tensor with shape: ``(batch_size, T_q, att_embedding_size * head_num)``.
+
+      Arguments
+        - **att_embedding_size**: int. The embedding size per attention head.
+        - **head_num**: int. The number of attention heads.
+        - **dropout_rate**: float in [0,1). Dropout rate applied on attention weights.
+        - **use_layer_norm**: bool. Whether to apply layer normalization on projected Q/K when ``attention_type='ln'``.
+        - **blinding**: bool. Whether to mask self-attention diagonal (no attending to itself).
+        - **seed**: int. Random seed.
+        - **supports_masking**: bool. Whether to support Keras masking.
+        - **attention_type**: str. One of {``'scaled_dot_product'``, ``'cos'``, ``'ln'``, ``'additive'``}.
+    """
+
+    def __init__(self, att_embedding_size=1, head_num=8, dropout_rate=0.0, use_layer_norm=False,
+                 blinding=False, seed=1024, supports_masking=False, attention_type="scaled_dot_product", **kwargs):
+        if head_num <= 0:
+            raise ValueError('head_num must be a int > 0')
+        self.att_embedding_size = att_embedding_size
+        self.head_num = head_num
+        self.num_units = att_embedding_size * head_num
+        self.dropout_rate = dropout_rate
+        self.use_layer_norm = use_layer_norm
+        self.blinding = blinding
+        self.seed = seed
+        self.supports_masking = supports_masking
+        self.attention_type = attention_type
+        super(MultiHeadAttention, self).__init__(**kwargs)
+
+    def build(self, input_shape):
+        if not isinstance(input_shape, (list, tuple)) or len(input_shape) < 2:
+            raise ValueError('A `MultiHeadAttention` layer should be called on a list of inputs.')
+        embedding_size = int(input_shape[0][-1])
+        if self.num_units <= 0:
+            raise ValueError("att_embedding_size * head_num must be > 0")
+        self.W_Query = self.add_weight(name='query', shape=[embedding_size, self.num_units],
+                                       dtype=tf.float32, initializer=TruncatedNormal(seed=self.seed))
+        self.W_key = self.add_weight(name='key', shape=[embedding_size, self.num_units],
+                                     dtype=tf.float32, initializer=TruncatedNormal(seed=self.seed + 1))
+        self.W_Value = self.add_weight(name='value', shape=[embedding_size, self.num_units],
+                                       dtype=tf.float32, initializer=TruncatedNormal(seed=self.seed + 2))
+
+        if self.attention_type == "additive":
+            self.b = self.add_weight('b', shape=[self.att_embedding_size], dtype=tf.float32,
+                                     initializer=glorot_uniform(seed=self.seed))
+            self.v = self.add_weight('v', shape=[self.att_embedding_size], dtype=tf.float32,
+                                     initializer=glorot_uniform(seed=self.seed))
+        elif self.attention_type == "ln":
+            # LayerNorm layers are only used when attention_type == 'ln'
+            self.att_ln_q = LayerNormalization()
+            self.att_ln_k = LayerNormalization()
+
+        self.dropout = Dropout(self.dropout_rate, seed=self.seed)
+        super(MultiHeadAttention, self).build(input_shape)
+
+    def call(self, inputs, mask=None, training=None, **kwargs):
+        if self.supports_masking:
+            if mask is None:
+                raise ValueError("When supports_masking=True, input must support masking")
+            if not isinstance(inputs, (list, tuple)) or len(inputs) < 2:
+                raise ValueError('A `MultiHeadAttention` layer should be called on a list of 2 or 3 inputs.')
+            if len(inputs) == 2:
+                queries, keys = inputs
+                values = keys
+            else:
+                queries, keys, values = inputs
+            # Keras mask is (batch, T)
+            if isinstance(mask, (list, tuple)) and len(mask) >= 2:
+                query_masks, key_masks = mask[0], mask[1]
+            else:
+                query_masks, key_masks = mask, mask
+            query_masks = tf.cast(query_masks, tf.float32)
+            key_masks = tf.cast(key_masks, tf.float32)
+        else:
+            if not isinstance(inputs, (list, tuple)) or len(inputs) not in (4, 5):
+                raise ValueError('A `MultiHeadAttention` layer should be called on a list of 4 or 5 inputs '
+                                 'when supports_masking=False.')
+            if len(inputs) == 4:
+                queries, keys, query_length, key_length = inputs
+                values = keys
+            else:
+                queries, keys, values, query_length, key_length = inputs
+            q_len = tf.squeeze(query_length, axis=-1)
+            k_len = tf.squeeze(key_length, axis=-1)
+            query_masks = tf.sequence_mask(q_len, tf.shape(queries)[1], dtype=tf.float32)  # (bs, T_q)
+            key_masks = tf.sequence_mask(k_len, tf.shape(keys)[1], dtype=tf.float32)  # (bs, T_k)
+
+        Q = tf.tensordot(queries, self.W_Query, axes=(-1, 0))  # (bs, T_q, D)
+        K_ = tf.tensordot(keys, self.W_key, axes=(-1, 0))  # (bs, T_k, D)
+        V = tf.tensordot(values, self.W_Value, axes=(-1, 0))  # (bs, T_v, D)
+
+        # (h*bs, T, D/h)
+        Q_ = tf.concat(tf.split(Q, self.head_num, axis=2), axis=0)
+        K__ = tf.concat(tf.split(K_, self.head_num, axis=2), axis=0)
+        V_ = tf.concat(tf.split(V, self.head_num, axis=2), axis=0)
+
+        if self.attention_type == "scaled_dot_product":
+            outputs = tf.matmul(Q_, K__, transpose_b=True)  # (h*bs, T_q, T_k)
+            outputs = outputs / (K__.get_shape().as_list()[-1] ** 0.5)
+        elif self.attention_type == "cos":
+            Q_cos = tf.nn.l2_normalize(Q_, dim=-1)
+            K_cos = tf.nn.l2_normalize(K__, dim=-1)
+            outputs = tf.matmul(Q_cos, K_cos, transpose_b=True)
+            outputs = outputs * 20
+        elif self.attention_type == 'ln':
+            Q_ln = self.att_ln_q(Q_) if self.use_layer_norm else Q_
+            K_ln = self.att_ln_k(K__) if self.use_layer_norm else K__
+            outputs = tf.matmul(Q_ln, K_ln, transpose_b=True)
+            outputs = outputs / (K__.get_shape().as_list()[-1] ** 0.5)
+        elif self.attention_type == "additive":
+            Q_reshaped = tf.expand_dims(Q_, axis=-2)  # (h*bs, T_q, 1, D/h)
+            K_reshaped = tf.expand_dims(K__, axis=-3)  # (h*bs, 1, T_k, D/h)
+            outputs = tf.tanh(tf.nn.bias_add(Q_reshaped + K_reshaped, self.b))
+            outputs = tf.squeeze(tf.tensordot(outputs, tf.expand_dims(self.v, axis=-1), axes=[-1, 0]), axis=-1)
+        else:
+            raise ValueError("attention_type must be [scaled_dot_product,cos,ln,additive]")
+
+        key_masks = tf.tile(key_masks, [self.head_num, 1])  # (h*bs, T_k)
+        key_masks = tf.tile(tf.expand_dims(key_masks, 1), [1, tf.shape(queries)[1], 1])  # (h*bs, T_q, T_k)
+        paddings = tf.ones_like(outputs) * (-2 ** 32 + 1)
+        outputs = tf.where(tf.equal(key_masks, 1), outputs, paddings)
+
+        if self.blinding:
+            try:
+                outputs = tf.matrix_set_diag(outputs, tf.ones_like(outputs)[:, :, 0] * (-2 ** 32 + 1))
+            except AttributeError:
+                outputs = tf.compat.v1.matrix_set_diag(outputs, tf.ones_like(outputs)[:, :, 0] * (-2 ** 32 + 1))
+
+        outputs -= reduce_max(outputs, axis=-1, keep_dims=True)
+        outputs = softmax(outputs)
+
+        query_masks = tf.tile(query_masks, [self.head_num, 1])  # (h*bs, T_q)
+        query_masks = tf.tile(tf.expand_dims(query_masks, -1), [1, 1, tf.shape(keys)[1]])  # (h*bs, T_q, T_k)
+        outputs *= query_masks
+
+        outputs = self.dropout(outputs, training=training)
+        result = tf.matmul(outputs, V_)  # (h*bs, T_q, D/h)
+        result = tf.concat(tf.split(result, self.head_num, axis=0), axis=2)  # (bs, T_q, D)
+        return result
+
+    def compute_output_shape(self, input_shape):
+        if not isinstance(input_shape, (list, tuple)):
+            return (None, None, self.num_units)
+        return (None, input_shape[0][1], self.num_units)
+
+    def compute_mask(self, inputs, mask=None):
+        return None
+
+    def get_config(self, ):
+        config = {'att_embedding_size': self.att_embedding_size, 'head_num': self.head_num,
+                  'dropout_rate': self.dropout_rate, 'use_layer_norm': self.use_layer_norm,
+                  'blinding': self.blinding, 'seed': self.seed, 'supports_masking': self.supports_masking,
+                  'attention_type': self.attention_type}
+        base_config = super(MultiHeadAttention, self).get_config()
+        return dict(list(base_config.items()) + list(config.items()))
+
+
 class Transformer(Layer):
     """  Simplified version of Transformer  proposed in 《Attention is all you need》
 
