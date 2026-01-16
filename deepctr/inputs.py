@@ -9,15 +9,15 @@ Author:
 from collections import defaultdict
 from itertools import chain
 
-from tensorflow.python.keras.layers import Embedding, Lambda
-from tensorflow.python.keras.regularizers import l2
+from tensorflow.keras.layers import Embedding, Lambda
+from tensorflow.keras.regularizers import l2
 
 from .layers.sequence import SequencePoolingLayer, WeightedSequenceLayer
 from .layers.utils import Hash
 
 
 def get_inputs_list(inputs):
-    return list(chain(*list(map(lambda x: x.values(), filter(lambda x: x is not None, inputs)))))
+    return list(chain.from_iterable(x.values() for x in inputs if x is not None))
 
 
 def create_embedding_dict(sparse_feature_columns, varlen_sparse_feature_columns, seed, l2_reg,

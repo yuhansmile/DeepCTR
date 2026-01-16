@@ -2,18 +2,21 @@ import pytest
 from packaging import version
 
 try:
-    from tensorflow.python.keras.utils.generic_utils import CustomObjectScope
+    from tensorflow.keras.utils.generic_utils import CustomObjectScope
 except ImportError:
-    from tensorflow.python.keras.utils import CustomObjectScope
+    from tensorflow.keras.utils import CustomObjectScope
 import tensorflow as tf
 from deepctr.layers import sequence
 
 from tests.utils import layer_test
 try:
-    tf.keras.backend.set_learning_phase(True)
+    if hasattr(tf.keras.backend, 'set_learning_phase'):
+        tf.keras.backend.set_learning_phase(True)
 except ImportError:
-    from tensorflow.python.keras.backend import set_learning_phase
+    from tensorflow.keras.backend import set_learning_phase
     set_learning_phase(True)
+except AttributeError:
+    pass
 BATCH_SIZE = 4
 EMBEDDING_SIZE = 8
 SEQ_LENGTH = 10
