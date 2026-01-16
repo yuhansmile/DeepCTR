@@ -10,10 +10,13 @@ from deepctr.layers import sequence
 
 from tests.utils import layer_test
 try:
-    tf.keras.backend.set_learning_phase(True)
+    if hasattr(tf.keras.backend, 'set_learning_phase'):
+        tf.keras.backend.set_learning_phase(True)
 except ImportError:
     from tensorflow.keras.backend import set_learning_phase
     set_learning_phase(True)
+except AttributeError:
+    pass
 BATCH_SIZE = 4
 EMBEDDING_SIZE = 8
 SEQ_LENGTH = 10

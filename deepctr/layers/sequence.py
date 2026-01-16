@@ -537,9 +537,24 @@ class Transformer(Layer):
         V = tf.tensordot(keys, self.W_Value, axes=(-1, 0))
 
         # h*N T_q D
-        Q_ = tf.concat(tf.split(Q, self.head_num, axis=2), axis=0)
-        K_ = tf.concat(tf.split(K, self.head_num, axis=2), axis=0)
-        V_ = tf.concat(tf.split(V, self.head_num, axis=2), axis=0)
+        # Optimized implementation using reshape/transpose instead of split/concat
+        batch_size = tf.shape(Q)[0]
+        
+        Q_ = tf.reshape(Q, (batch_size, -1, self.head_num, self.att_embedding_size))
+        Q_ = tf.transpose(Q_, perm=[0, 2, 1, 3]) # (N, h, T_q, D)
+        Q_ = tf.reshape(Q_, (-1, tf.shape(Q_)[2], self.att_embedding_size)) # (N*h, T_q, D)
+
+        K_ = tf.reshape(K, (batch_size, -1, self.head_num, self.att_embedding_size))
+        K_ = tf.transpose(K_, perm=[0, 2, 1, 3])
+        K_ = tf.reshape(K_, (-1, tf.shape(K_)[2], self.att_embedding_size))
+
+        V_ = tf.reshape(V, (batch_size, -1, self.head_num, self.att_embedding_size))
+        V_ = tf.transpose(V_, perm=[0, 2, 1, 3])
+        V_ = tf.reshape(V_, (-1, tf.shape(V_)[2], self.att_embedding_size))
+
+        # Q_ = tf.concat(tf.split(Q, self.head_num, axis=2), axis=0)
+        # K_ = tf.concat(tf.split(K, self.head_num, axis=2), axis=0)
+        # V_ = tf.concat(tf.split(V, self.head_num, axis=2), axis=0)
 
         if self.attention_type == "scaled_dot_product":
             # h*N T_q T_k
@@ -600,7 +615,12 @@ class Transformer(Layer):
         # Weighted sum
         # ( h*N, T_q, C/h)
         result = tf.matmul(outputs, V_)
-        result = tf.concat(tf.split(result, self.head_num, axis=0), axis=2)
+        # result = tf.concat(tf.split(result, self.head_num, axis=0), axis=2)
+        
+        # Restore shape
+        result = tf.reshape(result, (batch_size, self.head_num, -1, self.att_embedding_size))
+        result = tf.transpose(result, perm=[0, 2, 1, 3])
+        result = tf.reshape(result, (batch_size, -1, self.head_num * self.att_embedding_size))
 
         if self.use_res:
             # tf.tensordot(queries, self.W_Res, axes=(-1, 0))
@@ -652,7 +672,10 @@ class PositionEncoding(Layer):
 
     def build(self, input_shape):
         # Create a trainable weight variable for this layer.
-        _, T, num_units = input_shape.as_list()  # inputs.get_shape().as_list()
+        try:
+            _, T, num_units = input_shape.as_list()
+        except AttributeError:
+            _, T, num_units = input_shape
         # First part of the PE function: sin and cos argument
         position_enc = np.array([
             [pos / np.power(10000, 2. * (i // 2) / num_units) for i in range(num_units)]
